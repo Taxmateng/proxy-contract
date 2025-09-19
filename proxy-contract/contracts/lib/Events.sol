@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {TaxCategory} from "../Taxmate.sol";
+import {TaxCategory} from "./TaxTypes.sol";
 
 library Events {
         event UserRegistered(address indexed user, string tin, uint256 timestamp);
