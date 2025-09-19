@@ -1,21 +1,22 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.28;
 
-import "@openzeppelin/contracts/access/AccessControl.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/utils/Counters.sol";
-import "@openzeppelin/contracts/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/CountersUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import { Errors } from "./lib/Errors.sol";
 import { Events } from "./lib/Events.sol";
+import { TaxCategory, Gender, IdType } from "./lib/TaxTypes.sol";
 
 /**
  * @title Decentralized Tax Payment System
  * @dev A smart contract for managing tax payments on Base chain
  * @notice Supports WHT, PAYE, VAT, and other tax types with role-based access control
  */
-contract TaxPaymentSystem is Initializable, UUPSUpgradeable, AccessControl, ReentrancyGuard {
-    using Counters for Counters.Counter;
+contract Taxmate is Initializable, UUPSUpgradeable, AccessControlUpgradeable, ReentrancyGuardUpgradeable {
+    using CountersUpgradeable for CountersUpgradeable.Counter;
 
     // Role definitions
     bytes32 public constant SUPER_ADMIN_ROLE = keccak256("SUPER_ADMIN_ROLE");
@@ -23,15 +24,8 @@ contract TaxPaymentSystem is Initializable, UUPSUpgradeable, AccessControl, Reen
     bytes32 public constant TAX_PAYER_ROLE = keccak256("TAX_PAYER_ROLE");
 
     // Counters for IDs
-    Counters.Counter private _taxItemIds;
-    Counters.Counter private _paymentRecordIds;
-
-    // Tax categories
-    enum TaxCategory { WHT, PAYE, VAT, CONSUMPTION, OTHER }
-
-    enum IdType { BVN, NIN, CAC, VOTERS_CARD, DRIVERS_LICENSE, TIN }
-
-    enum Gender { MALE, FEMALE }
+    CountersUpgradeable.Counter private _taxItemIds;
+    CountersUpgradeable.Counter private _paymentRecordIds;
 
     // Tax item structure
     struct TaxItem {
@@ -92,7 +86,6 @@ contract TaxPaymentSystem is Initializable, UUPSUpgradeable, AccessControl, Reen
       string shareCapital;
       string shareCapitalInWords;
       string state;
-      string status;
       bool isActive;
       uint256 taxRegistrationDate;
       uint256 lastPaymentDate;
@@ -167,7 +160,7 @@ contract TaxPaymentSystem is Initializable, UUPSUpgradeable, AccessControl, Reen
     function addAdmin(address admin, bytes32 role) external onlySuperAdmin {
         require(role == SUPER_ADMIN_ROLE || role == SUB_ADMIN_ROLE, Errors.INVALID_ROLE(role));
         grantRole(role, admin);
-        emit AdminAdded(admin, role);
+        emit Events.AdminAdded(admin, role);
     }
 
     /**
@@ -177,14 +170,14 @@ contract TaxPaymentSystem is Initializable, UUPSUpgradeable, AccessControl, Reen
      */
     function removeAdmin(address admin, bytes32 role) external onlySuperAdmin {
         revokeRole(role, admin);
-        emit AdminRemoved(admin, role);
+        emit Events.AdminRemoved(admin, role);
     }
 
     /**
      * @dev Register a new taxpayer (called by backend after verification)
      * @param user Address of the taxpayer
      * @param tin Tax Identification Number
-     * @param idNumber 
+     * @param idNumber Id Number
      * string idType; BVN,NIN, CAC for verification
      * @param email  email for verification
      */
@@ -203,6 +196,15 @@ contract TaxPaymentSystem is Initializable, UUPSUpgradeable, AccessControl, Reen
         require(tinToAddress[tin] == address(0), Errors.TIN_ALREADY_EXISTS());
         require(individualProfiles[user].walletAddress == address(0), Errors.USER_EXISTS_ALREADY());
 
+        Gender genderEnum;
+        if (keccak256(abi.encodePacked(gender)) == keccak256(abi.encodePacked("male"))) {
+            genderEnum = Gender.MALE;
+        } else if (keccak256(abi.encodePacked(gender)) == keccak256(abi.encodePacked("female"))) {
+            genderEnum = Gender.FEMALE;
+        } else {
+            revert Errors.INVALID_GENDER();
+        }
+
         individualProfiles[user] = IndividualProfile({
           walletAddress: user,
           tin: tin,
@@ -213,7 +215,7 @@ contract TaxPaymentSystem is Initializable, UUPSUpgradeable, AccessControl, Reen
           lastname: lastname,
           middlename: middlename,
           dob: dob,
-          gender: gender == 'male' ? Gender.MALE : Gender.FEMALE,
+          gender: genderEnum,
           isActive: true,
           registrationDate: block.timestamp,
           lastPaymentDate: 0
@@ -229,7 +231,7 @@ contract TaxPaymentSystem is Initializable, UUPSUpgradeable, AccessControl, Reen
 
     function registerBusiness(
         address user,
-        string tin,
+        string memory tin,
         string memory rcNumber,
         string memory companyName,
         string memory companyType,
@@ -244,12 +246,12 @@ contract TaxPaymentSystem is Initializable, UUPSUpgradeable, AccessControl, Reen
         string memory shareCapital,
         string memory shareCapitalInWords,
         string memory state,
-        string memory status
+        bool isActive
     ) external validTIN(tin) {
         require(tinToAddress[tin] == address(0), Errors.TIN_ALREADY_EXISTS());
         require(businessProfiles[user].walletAddress == address(0), Errors.BUSINESS_EXISTS_ALREADY());
 
-        taxpayerProfiles[user] = BusinessProfile({
+        businessProfiles[user] = BusinessProfile({
           walletAddress: user,
           tin: tin,
           rcNumber: rcNumber,
@@ -266,7 +268,7 @@ contract TaxPaymentSystem is Initializable, UUPSUpgradeable, AccessControl, Reen
           shareCapital: shareCapital,
           shareCapitalInWords: shareCapitalInWords,
           state: state,
-          isActive: status == "active" ? true : false,
+          isActive: isActive,
           taxRegistrationDate: block.timestamp,
           lastPaymentDate: 0
         });
