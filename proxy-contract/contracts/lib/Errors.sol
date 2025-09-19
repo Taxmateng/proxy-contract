@@ -12,4 +12,5 @@ library Errors {
     error TIN_ALREADY_EXISTS();
     error USER_EXISTS_ALREADY();
     error BUSINESS_EXISTS_ALREADY();
+    error INVALID_GENDER();
 }
