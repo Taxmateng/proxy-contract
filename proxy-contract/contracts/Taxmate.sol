@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
@@ -100,6 +100,20 @@ contract Taxmate is Initializable, UUPSUpgradeable, AccessControlUpgradeable, Re
     mapping(address => BusinessProfile) public businessProfiles;
     mapping(address => uint256[]) public taxpayerPaymentHistory;
 
+    // Events
+    event TaxItemCreated(uint256 indexed itemId, string name, TaxCategory category, uint256 rate);
+    event TaxItemUpdated(uint256 indexed itemId, bool isActive, uint256 updatedAt);
+    event TaxPaid(
+        uint256 indexed recordId,
+        address indexed payer,
+        string tin,
+        uint256 itemId,
+        uint256 amountPaid,
+        string paymentRef,
+        string receiptHash,
+        uint256 timestamp
+    );
+
     // Modifiers
     modifier onlySuperAdmin() {
         require(hasRole(SUPER_ADMIN_ROLE, msg.sender), Errors.CALLER_IS_NOT_A_SUPER_ADMIN());
@@ -136,10 +150,15 @@ contract Taxmate is Initializable, UUPSUpgradeable, AccessControlUpgradeable, Re
      * @param superAdmin The address of the super admin
      */
     function initialize(address superAdmin) public initializer {
+        if (superAdmin == address(0)) {
+            revert Errors.INITIALIZER_CAN_NOT_BE_ADDRESS_ZERO();
+        }
         __UUPSUpgradeable_init();
         __AccessControl_init();
+        __ReentrancyGuard_init();
 
         _setupRole(SUPER_ADMIN_ROLE, superAdmin);
+        _setupRole(SUB_ADMIN_ROLE, superAdmin);
         _setRoleAdmin(SUPER_ADMIN_ROLE, SUPER_ADMIN_ROLE);
         _setRoleAdmin(SUB_ADMIN_ROLE, SUPER_ADMIN_ROLE);
         _setRoleAdmin(TAX_PAYER_ROLE, SUPER_ADMIN_ROLE);
@@ -193,8 +212,11 @@ contract Taxmate is Initializable, UUPSUpgradeable, AccessControlUpgradeable, Re
         string memory dob,
         string memory gender
     ) external validTIN(tin) {
+        require(user != address(0), Errors.CANNOT_REGISTER_ADDRESS_ZERO());
         require(tinToAddress[tin] == address(0), Errors.TIN_ALREADY_EXISTS());
         require(individualProfiles[user].walletAddress == address(0), Errors.USER_EXISTS_ALREADY());
+        require(businessProfiles[user].walletAddress == address(0), Errors.USER_EXISTS_ALREADY());
+
 
         Gender genderEnum;
         if (keccak256(abi.encodePacked(gender)) == keccak256(abi.encodePacked("male"))) {
@@ -224,7 +246,7 @@ contract Taxmate is Initializable, UUPSUpgradeable, AccessControlUpgradeable, Re
         tinToAddress[tin] = user;
         addressToTin[user] = tin;
 
-        grantRole(TAX_PAYER_ROLE, user);
+        _grantRole(TAX_PAYER_ROLE, user);
 
         emit Events.UserRegistered(user, tin, block.timestamp);
     }
@@ -248,8 +270,11 @@ contract Taxmate is Initializable, UUPSUpgradeable, AccessControlUpgradeable, Re
         string memory state,
         bool isActive
     ) external validTIN(tin) {
+        require(user != address(0), Errors.CANNOT_REGISTER_ADDRESS_ZERO());
         require(tinToAddress[tin] == address(0), Errors.TIN_ALREADY_EXISTS());
         require(businessProfiles[user].walletAddress == address(0), Errors.BUSINESS_EXISTS_ALREADY());
+        require(individualProfiles[user].walletAddress == address(0), Errors.BUSINESS_EXISTS_ALREADY());
+
 
         businessProfiles[user] = BusinessProfile({
           walletAddress: user,
@@ -263,7 +288,7 @@ contract Taxmate is Initializable, UUPSUpgradeable, AccessControlUpgradeable, Re
           city: city,
           classification: classification,
           headOfficeAddress: headOfficeAddress,
-          lga:lga,
+          lga: lga,
           affiliates: affiliates,
           shareCapital: shareCapital,
           shareCapitalInWords: shareCapitalInWords,
@@ -276,7 +301,7 @@ contract Taxmate is Initializable, UUPSUpgradeable, AccessControlUpgradeable, Re
         tinToAddress[tin] = user;
         addressToTin[user] = tin;
 
-        grantRole(TAX_PAYER_ROLE, user);
+        _grantRole(TAX_PAYER_ROLE, user);
 
         emit Events.UserRegistered(user, tin, block.timestamp);
     }
@@ -288,201 +313,236 @@ contract Taxmate is Initializable, UUPSUpgradeable, AccessControlUpgradeable, Re
      * @param category Tax category (WHT, PAYE, VAT, etc.)
      * @param rate Tax rate in basis points (1% = 100)
      */
-    // function createTaxItem(
-    //     string memory name,
-    //     string memory description,
-    //     TaxCategory category,
-    //     uint256 rate
-    // ) external onlySubAdmin {
-    //     _taxItemIds.increment();
-    //     uint256 newItemId = _taxItemIds.current();
+    function createTaxItem(
+        string memory name,
+        string memory description,
+        TaxCategory category,
+        uint256 rate
+    ) external onlySubAdmin {
+        _taxItemIds.increment();
+        uint256 newItemId = _taxItemIds.current();
 
-    //     taxItems[newItemId] = TaxItem({
-    //         itemId: newItemId,
-    //         name: name,
-    //         description: description,
-    //         category: category,
-    //         rate: rate,
-    //         isActive: true,
-    //         createdAt: block.timestamp,
-    //         updatedAt: block.timestamp
-    //     });
+        require(bytes(name).length > 0, Errors.TAX_ITEM_NAME_CANNOT_BE_EMPTY());
+        require(bytes(description).length > 0, Errors.TAX_ITEM_DESCRIPTION_CANNOT_BE_EMPTY());
 
-    //     emit TaxItemCreated(newItemId, name, category, rate);
-    // }
+        taxItems[newItemId] = TaxItem({
+            itemId: newItemId,
+            name: name,
+            description: description,
+            category: category,
+            rate: rate,
+            isActive: true,
+            createdAt: block.timestamp,
+            updatedAt: block.timestamp
+        });
 
-    // /**
-    //  * @dev Update tax item status
-    //  * @param itemId ID of the tax item to update
-    //  * @param isActive New active status
-    //  */
-    // function updateTaxItem(uint256 itemId, bool isActive) 
-    //     external 
-    //     onlySubAdmin 
-    //     taxItemExists(itemId) 
-    // {
-    //     taxItems[itemId].isActive = isActive;
-    //     taxItems[itemId].updatedAt = block.timestamp;
+        emit TaxItemCreated(newItemId, name, category, rate);
+    }
 
-    //     emit TaxItemUpdated(itemId, isActive, block.timestamp);
-    // }
+    /**
+     * @dev Update tax item status
+     * @param itemId ID of the tax item to update
+     * @param isActive New active status
+     */
+    function updateTaxItem(uint256 itemId, bool isActive) 
+        external 
+        onlySubAdmin 
+        taxItemExists(itemId) 
+    {
+        taxItems[itemId].isActive = isActive;
+        taxItems[itemId].updatedAt = block.timestamp;
+
+        emit TaxItemUpdated(itemId, isActive, block.timestamp);
+    }
 
     // TAX PAYER FUNCTIONS
 
-    // /**
-    //  * @dev Record a tax payment (called by backend after payment processing)
-    //  * @param payer Address of the taxpayer
-    //  * @param tin Tax Identification Number
-    //  * @param itemId ID of the tax item
-    //  * @param amountPaid Amount paid in USDC (assuming 6 decimals)
-    //  * @param paymentRef Payment reference from payment processor
-    //  * @param receiptHash IPFS hash of the receipt
-    //  */
-    // function recordTaxPayment(
-    //     address payer,
-    //     string memory tin,
-    //     uint256 itemId,
-    //     uint256 amountPaid,
-    //     string memory paymentRef,
-    //     string memory receiptHash
-    // ) external onlySubAdmin nonReentrant taxItemExists(itemId) taxItemActive(itemId) {
-    //     require(tinToAddress[tin] == payer, "TIN and address mismatch");
-    //     require(amountPaid > 0, "Amount must be greater than 0");
-    //     require(bytes(paymentRef).length > 0, "Payment reference required");
-    //     require(bytes(receiptHash).length > 0, "Receipt hash required");
+    /**
+     * @dev Record a tax payment (called by backend after payment processing)
+     * @param payer Address of the taxpayer
+     * @param tin Tax Identification Number
+     * @param itemId ID of the tax item
+     * @param amountPaid Amount paid in USDC (assuming 6 decimals)
+     * @param paymentRef Payment reference from payment processor
+     * @param receiptHash IPFS hash of the receipt
+     */
+    function recordTaxPayment(
+        address payer,
+        string memory tin,
+        uint256 itemId,
+        uint256 amountPaid,
+        string memory paymentRef,
+        string memory receiptHash
+    ) external onlySubAdmin nonReentrant taxItemExists(itemId) taxItemActive(itemId) {
+        require(tinToAddress[tin] == payer, Errors.TIN_AND_ADDRESS_MISMATCH(tin));
+        require(amountPaid > 0, Errors.AMOUNT_MUST_BE_GREATER_THAN_ZERO(amountPaid));
+        require(bytes(paymentRef).length > 0, Errors.PAYMENT_REFERENCE_REQUIRED());
+        require(bytes(receiptHash).length > 0, Errors.RECEIPT_HASH_REQUIRED());
 
-    //     _paymentRecordIds.increment();
-    //     uint256 newRecordId = _paymentRecordIds.current();
+        _paymentRecordIds.increment();
+        uint256 newRecordId = _paymentRecordIds.current();
 
-    //     TaxItem memory item = taxItems[itemId];
+        TaxItem memory item = taxItems[itemId];
 
-    //     paymentRecords[newRecordId] = PaymentRecord({
-    //         recordId: newRecordId,
-    //         payer: payer,
-    //         tin: tin,
-    //         itemId: itemId,
-    //         amountPaid: amountPaid,
-    //         paymentRef: paymentRef,
-    //         receiptHash: receiptHash,
-    //         timestamp: block.timestamp,
-    //         category: item.category
-    //     });
+        paymentRecords[newRecordId] = PaymentRecord({
+            recordId: newRecordId,
+            payer: payer,
+            tin: tin,
+            itemId: itemId,
+            amountPaid: amountPaid,
+            paymentRef: paymentRef,
+            receiptHash: receiptHash,
+            timestamp: block.timestamp,
+            category: item.category
+        });
 
-    //     taxpayerPaymentHistory[payer].push(newRecordId);
-    //     taxpayerProfiles[payer].lastPaymentDate = block.timestamp;
+        taxpayerPaymentHistory[payer].push(newRecordId);
 
-    //     emit TaxPaid(
-    //         newRecordId,
-    //         payer,
-    //         tin,
-    //         itemId,
-    //         amountPaid,
-    //         paymentRef,
-    //         receiptHash,
-    //         block.timestamp
-    //     );
-    // }
+        // Update last payment date for the appropriate profile
+        if (individualProfiles[payer].walletAddress != address(0)) {
+            individualProfiles[payer].lastPaymentDate = block.timestamp;
+        } else if (businessProfiles[payer].walletAddress != address(0)) {
+            businessProfiles[payer].lastPaymentDate = block.timestamp;
+        }
 
-    // // VIEW FUNCTIONS
+        emit TaxPaid(
+            newRecordId,
+            payer,
+            tin,
+            itemId,
+            amountPaid,
+            paymentRef,
+            receiptHash,
+            block.timestamp
+        );
+    }
 
-    // /**
-    //  * @dev Get taxpayer profile
-    //  * @param user Address of the taxpayer
-    //  */
-    // function getTaxpayerProfile(address user) external view returns (TaxpayerProfile memory) {
-    //     return taxpayerProfiles[user];
-    // }
+    // VIEW FUNCTIONS
 
-    // /**
-    //  * @dev Get tax item details
-    //  * @param itemId ID of the tax item
-    //  */
-    // function getTaxItem(uint256 itemId) external view returns (TaxItem memory) {
-    //     return taxItems[itemId];
-    // }
+    /**
+     * @dev Get individual taxpayer profile
+     * @param user Address of the taxpayer
+     */
+    function getIndividualProfile(address user) external view returns (IndividualProfile memory) {
+        require(individualProfiles[user].walletAddress != address(0), Errors.INDIVIDUAL_PROFILE_NOT_FOUND(user));
+        return individualProfiles[user];
+    }
 
-    // /**
-    //  * @dev Get payment record
-    //  * @param recordId ID of the payment record
-    //  */
-    // function getPaymentRecord(uint256 recordId) external view returns (PaymentRecord memory) {
-    //     return paymentRecords[recordId];
-    // }
+    /**
+     * @dev Get business taxpayer profile
+     * @param user Address of the taxpayer
+     */
+    function getBusinessProfile(address user) external view returns (BusinessProfile memory) {
+        require(businessProfiles[user].walletAddress != address(0), Errors.BUSINESS_PROFILE_NOT_FOUND(user));
+        return businessProfiles[user];
+    }
+
+    /**
+     * @dev Get tax item details
+     * @param itemId ID of the tax item
+     */
+    function getTaxItem(uint256 itemId) external view taxItemExists(itemId) returns (TaxItem memory) {
+        return taxItems[itemId];
+    }
+
+    /**
+     * @dev Get payment record
+     * @param recordId ID of the payment record
+     */
+    function getPaymentRecord(uint256 recordId) external view returns (PaymentRecord memory) {
+        require(paymentRecords[recordId].recordId != 0, Errors.PAYMENT_RECORD_NOT_FOUND(recordId));
+        return paymentRecords[recordId];
+    }
 
     /**
      * @dev Get taxpayer payment history
      * @param user Address of the taxpayer
      */
-    // function getTaxpayerPaymentHistory(address user) external view returns (uint256[] memory) {
-    //     return taxpayerPaymentHistory[user];
-    // }
+    function getTaxpayerPaymentHistory(address user) external view returns (uint256[] memory) {
+        return taxpayerPaymentHistory[user];
+    }
 
-    // /**
-    //  * @dev Get all active tax items
-    //  */
-    // function getActiveTaxItems() external view returns (TaxItem[] memory) {
-    //     uint256 activeCount = 0;
-    //     uint256 totalItems = _taxItemIds.current();
+    /**
+     * @dev Get all active tax items
+     */
+    function getActiveTaxItems() external view returns (TaxItem[] memory) {
+        uint256 activeCount = 0;
+        uint256 totalItems = _taxItemIds.current();
 
-    //     // Count active items
-    //     for (uint256 i = 1; i <= totalItems; i++) {
-    //         if (taxItems[i].isActive) {
-    //             activeCount++;
-    //         }
-    //     }
+        // Count active items
+        for (uint256 i = 1; i <= totalItems; i++) {
+            if (taxItems[i].isActive) {
+                activeCount++;
+            }
+        }
 
-    //     // Create and populate array
-    //     TaxItem[] memory activeItems = new TaxItem[](activeCount);
-    //     uint256 currentIndex = 0;
+        // Create and populate array
+        TaxItem[] memory activeItems = new TaxItem[](activeCount);
+        uint256 currentIndex = 0;
 
-    //     for (uint256 i = 1; i <= totalItems; i++) {
-    //         if (taxItems[i].isActive) {
-    //             activeItems[currentIndex] = taxItems[i];
-    //             currentIndex++;
-    //         }
-    //     }
+        for (uint256 i = 1; i <= totalItems; i++) {
+            if (taxItems[i].isActive) {
+                activeItems[currentIndex] = taxItems[i];
+                currentIndex++;
+            }
+        }
 
-    //     return activeItems;
-    // }
+        return activeItems;
+    }
 
-    // /**
-    //  * @dev Check if address is registered taxpayer
-    //  * @param user Address to check
-    //  */
-    // function isRegisteredTaxpayer(address user) external view returns (bool) {
-    //     return taxpayerProfiles[user].walletAddress != address(0);
-    // }
+    /**
+     * @dev Check if address is registered taxpayer
+     * @param user Address to check
+     */
+    function isRegisteredTaxpayer(address user) external view returns (bool) {
+        return individualProfiles[user].walletAddress != address(0) || 
+               businessProfiles[user].walletAddress != address(0);
+    }
 
-    // /**
-    //  * @dev Get total number of tax items
-    //  */
-    // function getTotalTaxItems() external view returns (uint256) {
-    //     return _taxItemIds.current();
-    // }
+    /**
+     * @dev Get total number of tax items
+     */
+    function getTotalTaxItems() external view returns (uint256) {
+        return _taxItemIds.current();
+    }
 
-    // /**
-    //  * @dev Get total number of payment records
-    //  */
-    // function getTotalPaymentRecords() external view returns (uint256) {
-    //     return _paymentRecordIds.current();
-    // }
+    /**
+     * @dev Get total number of payment records
+     */
+    function getTotalPaymentRecords() external view returns (uint256) {
+        return _paymentRecordIds.current();
+    }
 
-    // // UTILITY FUNCTIONS
+    /**
+     * @dev Get profile type (individual or business)
+     * @param user Address to check
+     */
+    function getProfileType(address user) external view returns (string memory) {
+        if (individualProfiles[user].walletAddress != address(0)) {
+            return "individual";
+        } else if (businessProfiles[user].walletAddress != address(0)) {
+            return "business";
+        } else {
+            return "none";
+        }
+    }
 
-    // /**
-    //  * @dev Convert basis points to percentage
-    //  * @param basisPoints Rate in basis points
-    //  */
-    // function basisPointsToPercentage(uint256 basisPoints) external pure returns (uint256) {
-    //     return basisPoints / 100;
-    // }
+    // UTILITY FUNCTIONS
 
-    // /**
-    //  * @dev Calculate tax amount
-    //  * @param amount Base amount
-    //  * @param basisPoints Tax rate in basis points
-    //  */
-    // function calculateTaxAmount(uint256 amount, uint256 basisPoints) external pure returns (uint256) {
-    //     return (amount * basisPoints) / 10000;
-    // }
+    /**
+     * @dev Convert basis points to percentage
+     * @param basisPoints Rate in basis points
+     */
+    function basisPointsToPercentage(uint256 basisPoints) external pure returns (uint256) {
+        return basisPoints / 100;
+    }
+
+    /**
+     * @dev Calculate tax amount
+     * @param amount Base amount
+     * @param basisPoints Tax rate in basis points
+     */
+    function calculateTaxAmount(uint256 amount, uint256 basisPoints) external pure returns (uint256) {
+        return (amount * basisPoints) / 10000;
+    }
 }
